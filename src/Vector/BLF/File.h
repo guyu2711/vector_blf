@@ -285,6 +285,42 @@ class VECTOR_BLF_EXPORT File final {
     virtual void setDefaultLogContainerSize(uint32_t defaultLogContainerSize);
 
     /**
+     * Get current buffer size of the asynchronous object queue.
+     *
+     * @return maximum number of objects buffered between the API and the writer thread
+     */
+    uint32_t objectQueueBufferSize() const;
+
+    /**
+     * Configure the buffer size of the asynchronous object queue.
+     *
+     * @param[in] bufferSize maximum number of buffered objects
+     */
+    void setObjectQueueBufferSize(uint32_t bufferSize);
+
+    /**
+     * Get current buffer size of the uncompressed data staging area.
+     *
+     * @return maximum amount of uncompressed bytes buffered in memory
+     */
+    std::streamsize uncompressedFileBufferSize() const;
+
+    /**
+     * Configure the buffer size of the uncompressed data staging area.
+     *
+     * @param[in] bufferSize maximum amount of uncompressed bytes buffered in memory
+     */
+    void setUncompressedFileBufferSize(std::streamsize bufferSize);
+
+    /**
+     * Configure both write buffer sizes at once.
+     *
+     * @param[in] objectQueueSize maximum number of buffered objects
+     * @param[in] uncompressedBufferSize maximum amount of uncompressed bytes buffered in memory
+     */
+    void setWriteBufferSizes(uint32_t objectQueueSize, std::streamsize uncompressedBufferSize);
+
+    /**
      * create object of given type
      *
      * @param type object type
@@ -312,6 +348,11 @@ class VECTOR_BLF_EXPORT File final {
      */
     ObjectQueue<ObjectHeaderBase> m_readWriteQueue {};
 
+    /**
+     * Maximum number of objects buffered by m_readWriteQueue.
+     */
+    uint32_t m_objectQueueBufferSize {1024};
+
     /* uncompressed file */
 
     /**
@@ -322,6 +363,11 @@ class VECTOR_BLF_EXPORT File final {
      * The compressionThread transfers data from/to here into the uncompressedFile.
      */
     UncompressedFile m_uncompressedFile {};
+
+    /**
+     * Maximum number of uncompressed bytes kept in memory before they are compressed and written to disk.
+     */
+    std::streamsize m_uncompressedFileBufferSize {};
 
     /**
      * thread between readWriteQueue and uncompressedFile
@@ -405,6 +451,16 @@ class VECTOR_BLF_EXPORT File final {
      * transfer data from uncompressedfile to compressedFile
      */
     static void compressedFileWriteThread(File * file);
+
+    /**
+     * Apply the configured object queue buffer size to the queue instance.
+     */
+    void updateObjectQueueBufferSize();
+
+    /**
+     * Apply the configured uncompressed buffer size to the staging buffer instance.
+     */
+    void updateUncompressedFileBufferSize();
 };
 
 }

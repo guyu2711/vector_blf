@@ -14,8 +14,10 @@ namespace BLF {
 
 File::File() {
     /* set performance/memory values */
-    m_readWriteQueue.setBufferSize(10);
-    m_uncompressedFile.setBufferSize(m_uncompressedFile.defaultLogContainerSize());
+    const std::streamsize minimumBufferSize = static_cast<std::streamsize>(m_uncompressedFile.defaultLogContainerSize());
+    m_uncompressedFileBufferSize = minimumBufferSize * 4;
+    updateObjectQueueBufferSize();
+    updateUncompressedFileBufferSize();
 }
 
 File::~File() {
@@ -189,6 +191,7 @@ uint32_t File::defaultLogContainerSize() const {
 
 void File::setDefaultLogContainerSize(uint32_t defaultLogContainerSize) {
     m_uncompressedFile.setDefaultLogContainerSize(defaultLogContainerSize);
+    updateUncompressedFileBufferSize();
 }
 
 ObjectHeaderBase * File::createObject(ObjectType type) {
@@ -904,6 +907,44 @@ void File::compressedFileWriteThread(File * file) {
     } catch (...) {
         file->m_compressedFileThreadException = std::current_exception();
     }
+}
+
+uint32_t File::objectQueueBufferSize() const {
+    return m_objectQueueBufferSize;
+}
+
+void File::setObjectQueueBufferSize(uint32_t bufferSize) {
+    if (bufferSize == 0) {
+        bufferSize = 1;
+    }
+    m_objectQueueBufferSize = bufferSize;
+    updateObjectQueueBufferSize();
+}
+
+std::streamsize File::uncompressedFileBufferSize() const {
+    return m_uncompressedFileBufferSize;
+}
+
+void File::setUncompressedFileBufferSize(std::streamsize bufferSize) {
+    m_uncompressedFileBufferSize = bufferSize;
+    updateUncompressedFileBufferSize();
+}
+
+void File::setWriteBufferSizes(uint32_t objectQueueSize, std::streamsize uncompressedBufferSize) {
+    setObjectQueueBufferSize(objectQueueSize);
+    setUncompressedFileBufferSize(uncompressedBufferSize);
+}
+
+void File::updateObjectQueueBufferSize() {
+    m_readWriteQueue.setBufferSize(m_objectQueueBufferSize);
+}
+
+void File::updateUncompressedFileBufferSize() {
+    const std::streamsize minimumBufferSize = static_cast<std::streamsize>(m_uncompressedFile.defaultLogContainerSize());
+    if ((m_uncompressedFileBufferSize <= 0) || (m_uncompressedFileBufferSize < minimumBufferSize)) {
+        m_uncompressedFileBufferSize = minimumBufferSize;
+    }
+    m_uncompressedFile.setBufferSize(m_uncompressedFileBufferSize);
 }
 
 }

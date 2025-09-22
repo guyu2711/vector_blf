@@ -62,6 +62,29 @@ BOOST_AUTO_TEST_CASE(defaultContainerSize) {
     BOOST_CHECK_EQUAL(file.defaultLogContainerSize(), 0x30000);
 }
 
+/** test getter/setter for buffer configuration */
+BOOST_AUTO_TEST_CASE(bufferConfiguration) {
+    Vector::BLF::File file;
+
+    const auto defaultContainerSize = file.defaultLogContainerSize();
+    BOOST_CHECK_EQUAL(file.objectQueueBufferSize(), 1024U);
+    BOOST_CHECK_EQUAL(
+        file.uncompressedFileBufferSize(),
+        static_cast<std::streamsize>(defaultContainerSize) * 4);
+
+    file.setWriteBufferSizes(2048U, static_cast<std::streamsize>(defaultContainerSize) * 8);
+    BOOST_CHECK_EQUAL(file.objectQueueBufferSize(), 2048U);
+    BOOST_CHECK_EQUAL(
+        file.uncompressedFileBufferSize(),
+        static_cast<std::streamsize>(defaultContainerSize) * 8);
+
+    file.setObjectQueueBufferSize(0U);
+    BOOST_CHECK_EQUAL(file.objectQueueBufferSize(), 1U);
+
+    file.setUncompressedFileBufferSize(1);
+    BOOST_CHECK_EQUAL(file.uncompressedFileBufferSize(), static_cast<std::streamsize>(file.defaultLogContainerSize()));
+}
+
 /** Test file with only two CanMessages, but no LogContainers. */
 BOOST_AUTO_TEST_CASE(fileWithoutLogContainers) {
     Vector::BLF::File file;
