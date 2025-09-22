@@ -9,7 +9,10 @@ avoid blocking producers. Use `Vector::BLF::File::setObjectQueueBufferSize()`
 and `Vector::BLF::File::setUncompressedFileBufferSize()` (or the combined
 `setWriteBufferSizes()` helper) to increase the number of objects and the amount
 of uncompressed data that may be staged in memory before it is compressed and
-written to disk.
+written to disk. Compression runs on a single thread by default; call
+`Vector::BLF::File::setCompressionThreadCount(0)` to scale automatically to the
+hardware thread count or pass an explicit value greater than one to expand
+parallelism.
 
 # Build on Linux (e.g. Debian Testing)
 

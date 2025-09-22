@@ -8,6 +8,7 @@
 #endif
 #include <boost/test/unit_test.hpp>
 #include <boost/filesystem.hpp>
+#include <thread>
 
 #include <Vector/BLF.h>
 
@@ -83,6 +84,22 @@ BOOST_AUTO_TEST_CASE(bufferConfiguration) {
 
     file.setUncompressedFileBufferSize(1);
     BOOST_CHECK_EQUAL(file.uncompressedFileBufferSize(), static_cast<std::streamsize>(file.defaultLogContainerSize()));
+}
+
+/** test getter/setter for compression thread configuration */
+BOOST_AUTO_TEST_CASE(compressionThreadConfiguration) {
+    Vector::BLF::File file;
+
+    BOOST_CHECK_EQUAL(file.compressionThreadCount(), 1U);
+
+    const auto hardwareThreads = std::thread::hardware_concurrency();
+    const auto expectedHardwareThreads = hardwareThreads == 0U ? 1U : hardwareThreads;
+
+    file.setCompressionThreadCount(0U);
+    BOOST_CHECK_EQUAL(file.compressionThreadCount(), expectedHardwareThreads);
+
+    file.setCompressionThreadCount(3U);
+    BOOST_CHECK_EQUAL(file.compressionThreadCount(), 3U);
 }
 
 /** Test file with only two CanMessages, but no LogContainers. */
