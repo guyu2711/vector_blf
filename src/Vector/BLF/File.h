@@ -313,6 +313,24 @@ class VECTOR_BLF_EXPORT File final {
     void setUncompressedFileBufferSize(std::streamsize bufferSize);
 
     /**
+     * Get the number of compression threads.
+     *
+     * @return number of threads used for compression work
+     */
+    uint32_t compressionThreadCount() const;
+
+    /**
+     * Configure the number of compression threads.
+     *
+     * Passing 0 will use the number of concurrent threads supported by the
+     * hardware. If that query returns 0, a single compression thread is used
+     * as a safe fallback.
+     *
+     * @param[in] threadCount number of threads that may perform compression
+     */
+    void setCompressionThreadCount(uint32_t threadCount);
+
+    /**
      * Configure both write buffer sizes at once.
      *
      * @param[in] objectQueueSize maximum number of buffered objects
@@ -368,6 +386,11 @@ class VECTOR_BLF_EXPORT File final {
      * Maximum number of uncompressed bytes kept in memory before they are compressed and written to disk.
      */
     std::streamsize m_uncompressedFileBufferSize {};
+
+    /**
+     * Number of threads allowed to compress staged data.
+     */
+    uint32_t m_compressionThreadCount {1};
 
     /**
      * thread between readWriteQueue and uncompressedFile

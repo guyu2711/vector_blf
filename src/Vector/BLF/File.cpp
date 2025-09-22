@@ -930,6 +930,20 @@ void File::setUncompressedFileBufferSize(std::streamsize bufferSize) {
     updateUncompressedFileBufferSize();
 }
 
+uint32_t File::compressionThreadCount() const {
+    return m_compressionThreadCount;
+}
+
+void File::setCompressionThreadCount(uint32_t threadCount) {
+    if (threadCount == 0U) {
+        threadCount = std::thread::hardware_concurrency();
+    }
+    if (threadCount == 0U) {
+        threadCount = 1U;
+    }
+    m_compressionThreadCount = threadCount;
+}
+
 void File::setWriteBufferSizes(uint32_t objectQueueSize, std::streamsize uncompressedBufferSize) {
     setObjectQueueBufferSize(objectQueueSize);
     setUncompressedFileBufferSize(uncompressedBufferSize);
