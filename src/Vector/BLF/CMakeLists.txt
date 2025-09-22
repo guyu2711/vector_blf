@@ -301,6 +301,12 @@ target_sources(${PROJECT_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}/WlanFrame.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/WlanStatistic.cpp)
 
+add_executable(vector_blf_file_write_benchmark
+    tools/file_write_benchmark.cpp)
+target_link_libraries(vector_blf_file_write_benchmark
+    PRIVATE
+        ${PROJECT_NAME})
+
 # generated files
 configure_file(config.h.in config.h)
 configure_file(${PROJECT_NAME}.pc.in ${PROJECT_NAME}.pc @ONLY)
