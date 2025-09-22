@@ -28,11 +28,15 @@ if(OPTION_BUILD_EXAMPLES)
     target_sources(vector-blf-write-example PRIVATE Write-Example.cpp)
     target_link_libraries(vector-blf-write-example PRIVATE ${PROJECT_NAME})
 
+    add_executable(vector-blf-multi-writer-benchmark "")
+    target_sources(vector-blf-multi-writer-benchmark PRIVATE MultiWriterBenchmark.cpp)
+    target_link_libraries(vector-blf-multi-writer-benchmark PRIVATE ${PROJECT_NAME})
+
     install(
-        TARGETS vector-blf-parser vector-blf-write-example
+        TARGETS vector-blf-parser vector-blf-write-example vector-blf-multi-writer-benchmark
         DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 install(
-    FILES Parser.cpp Write-Example.cpp
+    FILES Parser.cpp Write-Example.cpp MultiWriterBenchmark.cpp
     DESTINATION ${CMAKE_INSTALL_DOCDIR}/examples)

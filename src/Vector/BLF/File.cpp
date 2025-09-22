@@ -4,8 +4,11 @@
 
 #include <Vector/BLF/File.h>
 
+#include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <utility>
+#include <thread>
 
 #include <Vector/BLF/Exceptions.h>
 
@@ -14,8 +17,14 @@ namespace BLF {
 
 File::File() {
     /* set performance/memory values */
-    m_readWriteQueue.setBufferSize(10);
-    m_uncompressedFile.setBufferSize(m_uncompressedFile.defaultLogContainerSize());
+    const auto hardwareThreads = std::thread::hardware_concurrency();
+    if (hardwareThreads != 0U) {
+        m_compressionThreadCount = static_cast<uint32_t>(hardwareThreads);
+    }
+    const std::streamsize minimumBufferSize = static_cast<std::streamsize>(m_uncompressedFile.defaultLogContainerSize());
+    m_uncompressedFileBufferSize = minimumBufferSize * 4;
+    updateObjectQueueBufferSize();
+    updateUncompressedFileBufferSize();
 }
 
 File::~File() {
@@ -64,6 +73,9 @@ void File::open(const char * filename, const std::ios_base::openmode mode) {
             /* prepare threads */
             m_uncompressedFileThreadRunning = true;
             m_compressedFileThreadRunning = true;
+
+            resetCompressionCoordinator();
+            startCompressionWorkers();
 
             /* create write threads */
             m_uncompressedFileThread = std::thread(uncompressedFileWriteThread, this);
@@ -142,6 +154,15 @@ void File::close() {
             }
         }
 
+        stopCompressionWorkers();
+        if (m_compressionWorkerException) {
+            try {
+                std::rethrow_exception(m_compressionWorkerException);
+            } catch (const std::exception & ex) {
+                std::cerr << "compressionWorker exited with exception: " << ex.what() << std::endl;
+            }
+        }
+
         /* finalize compressedFileThread */
         if (m_compressedFileThread.joinable())
             m_compressedFileThread.join();
@@ -189,6 +210,7 @@ uint32_t File::defaultLogContainerSize() const {
 
 void File::setDefaultLogContainerSize(uint32_t defaultLogContainerSize) {
     m_uncompressedFile.setDefaultLogContainerSize(defaultLogContainerSize);
+    updateUncompressedFileBufferSize();
 }
 
 ObjectHeaderBase * File::createObject(ObjectType type) {
@@ -794,35 +816,24 @@ void File::compressedFile2UncompressedFile() {
 }
 
 void File::uncompressedFile2CompressedFile() {
-    /* setup new log container */
-    LogContainer logContainer;
-
-    /* copy data into LogContainer */
-    logContainer.uncompressedFile.resize(m_uncompressedFile.defaultLogContainerSize());
-    m_uncompressedFile.read(
-        reinterpret_cast<char *>(logContainer.uncompressedFile.data()),
-        m_uncompressedFile.defaultLogContainerSize());
-    logContainer.uncompressedFileSize = static_cast<uint32_t>(m_uncompressedFile.gcount());
-    logContainer.uncompressedFile.resize(logContainer.uncompressedFileSize);
-
-    /* compress */
-    if (compressionLevel == 0) {
-        /* no compression */
-        logContainer.compress(0, 0);
-    } else {
-        /* zlib compression */
-        logContainer.compress(2, compressionLevel);
+    uint64_t sequence = 0;
+    std::shared_ptr<LogContainer> logContainer = acquireNextLogContainer(sequence);
+    if (!logContainer) {
+        return;
     }
 
-    /* write log container */
-    logContainer.write(m_compressedFile);
+    if (compressionLevel == 0) {
+        logContainer->compress(0, 0);
+    } else {
+        logContainer->compress(2, compressionLevel);
+    }
 
-    /* statistics */
+    logContainer->write(m_compressedFile);
+
     currentUncompressedFileSize +=
-        logContainer.internalHeaderSize() +
-        logContainer.uncompressedFileSize;
+        logContainer->internalHeaderSize() +
+        logContainer->uncompressedFileSize;
 
-    /* drop old data */
     m_uncompressedFile.dropOldData();
 }
 
@@ -890,20 +901,203 @@ void File::compressedFileReadThread(File * file) {
 
 void File::compressedFileWriteThread(File * file) {
     try {
-        while (file->m_compressedFileThreadRunning) {
-            /* process */
-            file->uncompressedFile2CompressedFile();
-
-            /* check for eof */
-            if (!file->m_uncompressedFile.good())
-                file->m_compressedFileThreadRunning = false;
-        }
-
-        /* set end of file */
-        // There is no CompressedFile::setFileSize that need to be set. std::fstream handles this already.
+        file->compressedFileWriterLoop();
     } catch (...) {
         file->m_compressedFileThreadException = std::current_exception();
     }
+}
+
+void File::compressionWorkerThread(File * file) {
+    file->m_activeCompressionWorkers.fetch_add(1, std::memory_order_acq_rel);
+    try {
+        while (!file->m_abortCompressionWorkers.load(std::memory_order_acquire)) {
+            uint64_t sequence = 0;
+            std::shared_ptr<LogContainer> logContainer = file->acquireNextLogContainer(sequence);
+            if (!logContainer) {
+                break;
+            }
+
+            if (file->compressionLevel == 0) {
+                logContainer->compress(0, 0);
+            } else {
+                logContainer->compress(2, file->compressionLevel);
+            }
+
+            file->publishCompressedLogContainer(sequence, std::move(logContainer));
+        }
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(file->m_compressionExceptionMutex);
+        if (!file->m_compressionWorkerException) {
+            file->m_compressionWorkerException = std::current_exception();
+        }
+        file->m_abortCompressionWorkers.store(true, std::memory_order_release);
+    }
+
+    if (file->m_activeCompressionWorkers.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        std::lock_guard<std::mutex> lock(file->m_readyCompressedLogContainersMutex);
+        file->m_readyCompressedLogContainersFinished = true;
+    }
+    file->m_readyCompressedLogContainersCv.notify_all();
+}
+
+void File::startCompressionWorkers() {
+    const uint32_t workerCount = std::max<uint32_t>(1, m_compressionThreadCount);
+    m_compressionWorkers.clear();
+    m_compressionWorkers.reserve(workerCount);
+    for (uint32_t index = 0; index < workerCount; ++index) {
+        m_compressionWorkers.emplace_back(compressionWorkerThread, this);
+    }
+}
+
+void File::stopCompressionWorkers() {
+    for (auto & worker : m_compressionWorkers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    m_compressionWorkers.clear();
+
+    if (!m_readyCompressedLogContainersFinished && (m_activeCompressionWorkers.load(std::memory_order_acquire) == 0)) {
+        std::lock_guard<std::mutex> lock(m_readyCompressedLogContainersMutex);
+        m_readyCompressedLogContainersFinished = true;
+    }
+    m_readyCompressedLogContainersCv.notify_all();
+}
+
+void File::resetCompressionCoordinator() {
+    m_compressionWorkerException = nullptr;
+    m_nextUncompressedSequence.store(0, std::memory_order_relaxed);
+    m_nextSequenceToWrite = 0;
+    m_activeCompressionWorkers.store(0, std::memory_order_relaxed);
+    m_readyCompressedLogContainersFinished = false;
+    m_abortCompressionWorkers.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(m_readyCompressedLogContainersMutex);
+        m_readyCompressedLogContainers.clear();
+    }
+}
+
+std::shared_ptr<LogContainer> File::acquireNextLogContainer(uint64_t & sequence) {
+    if (m_abortCompressionWorkers.load(std::memory_order_acquire)) {
+        return nullptr;
+    }
+
+    auto logContainer = std::make_shared<LogContainer>();
+    logContainer->uncompressedFile.resize(m_uncompressedFile.defaultLogContainerSize());
+    m_uncompressedFile.read(
+        reinterpret_cast<char *>(logContainer->uncompressedFile.data()),
+        m_uncompressedFile.defaultLogContainerSize());
+    const std::streamsize bytesRead = m_uncompressedFile.gcount();
+    if (bytesRead <= 0) {
+        return nullptr;
+    }
+
+    logContainer->uncompressedFileSize = static_cast<uint32_t>(bytesRead);
+    logContainer->uncompressedFile.resize(logContainer->uncompressedFileSize);
+    sequence = m_nextUncompressedSequence.fetch_add(1, std::memory_order_acq_rel);
+    return logContainer;
+}
+
+void File::publishCompressedLogContainer(uint64_t sequence, std::shared_ptr<LogContainer> logContainer) {
+    {
+        std::lock_guard<std::mutex> lock(m_readyCompressedLogContainersMutex);
+        m_readyCompressedLogContainers.emplace(sequence, std::move(logContainer));
+    }
+    m_readyCompressedLogContainersCv.notify_all();
+}
+
+void File::compressedFileWriterLoop() {
+    while (true) {
+        std::shared_ptr<LogContainer> logContainer;
+        {
+            std::unique_lock<std::mutex> lock(m_readyCompressedLogContainersMutex);
+            m_readyCompressedLogContainersCv.wait(lock, [&] {
+                return m_abortCompressionWorkers.load(std::memory_order_acquire) ||
+                    (m_readyCompressedLogContainers.find(m_nextSequenceToWrite) != m_readyCompressedLogContainers.end()) ||
+                    (m_readyCompressedLogContainersFinished && m_readyCompressedLogContainers.empty());
+            });
+
+            if (m_abortCompressionWorkers.load(std::memory_order_acquire)) {
+                break;
+            }
+
+            auto ready = m_readyCompressedLogContainers.find(m_nextSequenceToWrite);
+            if (ready == m_readyCompressedLogContainers.end()) {
+                if (m_readyCompressedLogContainersFinished && m_readyCompressedLogContainers.empty()) {
+                    break;
+                }
+                continue;
+            }
+
+            logContainer = std::move(ready->second);
+            m_readyCompressedLogContainers.erase(ready);
+            ++m_nextSequenceToWrite;
+        }
+
+        if (!logContainer) {
+            continue;
+        }
+
+        logContainer->write(m_compressedFile);
+
+        currentUncompressedFileSize +=
+            logContainer->internalHeaderSize() +
+            logContainer->uncompressedFileSize;
+
+        m_uncompressedFile.dropOldData();
+    }
+
+    m_compressedFileThreadRunning = false;
+}
+
+uint32_t File::objectQueueBufferSize() const {
+    return m_objectQueueBufferSize;
+}
+
+void File::setObjectQueueBufferSize(uint32_t bufferSize) {
+    if (bufferSize == 0) {
+        bufferSize = 1;
+    }
+    m_objectQueueBufferSize = bufferSize;
+    updateObjectQueueBufferSize();
+}
+
+std::streamsize File::uncompressedFileBufferSize() const {
+    return m_uncompressedFileBufferSize;
+}
+
+void File::setUncompressedFileBufferSize(std::streamsize bufferSize) {
+    m_uncompressedFileBufferSize = bufferSize;
+    updateUncompressedFileBufferSize();
+}
+
+void File::setWriteBufferSizes(uint32_t objectQueueSize, std::streamsize uncompressedBufferSize) {
+    setObjectQueueBufferSize(objectQueueSize);
+    setUncompressedFileBufferSize(uncompressedBufferSize);
+}
+
+uint32_t File::compressionThreadCount() const {
+    return m_compressionThreadCount;
+}
+
+void File::setCompressionThreadCount(uint32_t threadCount) {
+    if (threadCount == 0) {
+        const auto hardwareThreads = std::thread::hardware_concurrency();
+        threadCount = (hardwareThreads == 0U) ? 1U : static_cast<uint32_t>(hardwareThreads);
+    }
+    m_compressionThreadCount = threadCount;
+}
+
+void File::updateObjectQueueBufferSize() {
+    m_readWriteQueue.setBufferSize(m_objectQueueBufferSize);
+}
+
+void File::updateUncompressedFileBufferSize() {
+    const std::streamsize minimumBufferSize = static_cast<std::streamsize>(m_uncompressedFile.defaultLogContainerSize());
+    if ((m_uncompressedFileBufferSize <= 0) || (m_uncompressedFileBufferSize < minimumBufferSize)) {
+        m_uncompressedFileBufferSize = minimumBufferSize;
+    }
+    m_uncompressedFile.setBufferSize(m_uncompressedFileBufferSize);
 }
 
 }

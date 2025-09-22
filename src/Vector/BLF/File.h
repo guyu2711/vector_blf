@@ -7,8 +7,12 @@
 #include <Vector/BLF/platform.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include <Vector/BLF/CompressedFile.h>
 #include <Vector/BLF/FileStatistics.h>
@@ -285,6 +289,54 @@ class VECTOR_BLF_EXPORT File final {
     virtual void setDefaultLogContainerSize(uint32_t defaultLogContainerSize);
 
     /**
+     * Get current buffer size of the asynchronous object queue.
+     *
+     * @return maximum number of objects buffered between the API and the writer thread
+     */
+    uint32_t objectQueueBufferSize() const;
+
+    /**
+     * Configure the buffer size of the asynchronous object queue.
+     *
+     * @param[in] bufferSize maximum number of buffered objects
+     */
+    void setObjectQueueBufferSize(uint32_t bufferSize);
+
+    /**
+     * Get current buffer size of the uncompressed data staging area.
+     *
+     * @return maximum amount of uncompressed bytes buffered in memory
+     */
+    std::streamsize uncompressedFileBufferSize() const;
+
+    /**
+     * Configure the buffer size of the uncompressed data staging area.
+     *
+     * @param[in] bufferSize maximum amount of uncompressed bytes buffered in memory
+     */
+    void setUncompressedFileBufferSize(std::streamsize bufferSize);
+
+    /**
+     * Configure both write buffer sizes at once.
+     *
+     * @param[in] objectQueueSize maximum number of buffered objects
+     * @param[in] uncompressedBufferSize maximum amount of uncompressed bytes buffered in memory
+     */
+    void setWriteBufferSizes(uint32_t objectQueueSize, std::streamsize uncompressedBufferSize);
+
+    /**
+     * Number of background compression worker threads used while writing BLF files.
+     */
+    uint32_t compressionThreadCount() const;
+
+    /**
+     * Configure how many background compression worker threads should be spawned.
+     *
+     * @param[in] threadCount desired number of compression threads (0 picks a default of one)
+     */
+    void setCompressionThreadCount(uint32_t threadCount);
+
+    /**
      * create object of given type
      *
      * @param type object type
@@ -312,6 +364,11 @@ class VECTOR_BLF_EXPORT File final {
      */
     ObjectQueue<ObjectHeaderBase> m_readWriteQueue {};
 
+    /**
+     * Maximum number of objects buffered by m_readWriteQueue.
+     */
+    uint32_t m_objectQueueBufferSize {1024};
+
     /* uncompressed file */
 
     /**
@@ -322,6 +379,11 @@ class VECTOR_BLF_EXPORT File final {
      * The compressionThread transfers data from/to here into the uncompressedFile.
      */
     UncompressedFile m_uncompressedFile {};
+
+    /**
+     * Maximum number of uncompressed bytes kept in memory before they are compressed and written to disk.
+     */
+    std::streamsize m_uncompressedFileBufferSize {};
 
     /**
      * thread between readWriteQueue and uncompressedFile
@@ -364,6 +426,66 @@ class VECTOR_BLF_EXPORT File final {
      */
     std::atomic<bool> m_compressedFileThreadRunning {};
 
+    /**
+     * Additional compression worker threads that prepare log containers for the writer.
+     */
+    std::vector<std::thread> m_compressionWorkers {};
+
+    /**
+     * First exception thrown by one of the compression workers.
+     */
+    std::exception_ptr m_compressionWorkerException {nullptr};
+
+    /**
+     * Guard access to the stored compression worker exception.
+     */
+    std::mutex m_compressionExceptionMutex {};
+
+    /**
+     * Sequence number assigned to the next uncompressed log container.
+     */
+    std::atomic<uint64_t> m_nextUncompressedSequence {0};
+
+    /**
+     * Sequence number of the next log container that must be written to the compressed file.
+     */
+    uint64_t m_nextSequenceToWrite {0};
+
+    /**
+     * Compressed log containers waiting to be written, keyed by sequence number.
+     */
+    std::map<uint64_t, std::shared_ptr<LogContainer>> m_readyCompressedLogContainers {};
+
+    /**
+     * Synchronize access to the ready compressed container map.
+     */
+    std::mutex m_readyCompressedLogContainersMutex {};
+
+    /**
+     * Notifies the writer thread when new compressed containers are available or when draining completes.
+     */
+    std::condition_variable m_readyCompressedLogContainersCv {};
+
+    /**
+     * Number of compression workers that are currently running.
+     */
+    std::atomic<uint32_t> m_activeCompressionWorkers {0};
+
+    /**
+     * True once all compression workers have stopped producing log containers.
+     */
+    bool m_readyCompressedLogContainersFinished {false};
+
+    /**
+     * Allows aborting compression workers during shutdown.
+     */
+    std::atomic<bool> m_abortCompressionWorkers {false};
+
+    /**
+     * Configured number of background compression worker threads.
+     */
+    uint32_t m_compressionThreadCount {1};
+
     /* internal functions */
 
     /**
@@ -405,6 +527,28 @@ class VECTOR_BLF_EXPORT File final {
      * transfer data from uncompressedfile to compressedFile
      */
     static void compressedFileWriteThread(File * file);
+
+    /**
+     * Background worker compressing staged log containers.
+     */
+    static void compressionWorkerThread(File * file);
+
+    void startCompressionWorkers();
+    void stopCompressionWorkers();
+    void resetCompressionCoordinator();
+    std::shared_ptr<LogContainer> acquireNextLogContainer(uint64_t & sequence);
+    void publishCompressedLogContainer(uint64_t sequence, std::shared_ptr<LogContainer> logContainer);
+    void compressedFileWriterLoop();
+
+    /**
+     * Apply the configured object queue buffer size to the queue instance.
+     */
+    void updateObjectQueueBufferSize();
+
+    /**
+     * Apply the configured uncompressed buffer size to the staging buffer instance.
+     */
+    void updateUncompressedFileBufferSize();
 };
 
 }

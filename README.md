@@ -2,6 +2,28 @@
 
 This is a library to access Binary Log File (BLF) files from Vector Informatik.
 
+## Performance tuning
+
+High-throughput recording setups can adjust the asynchronous writer buffers to
+avoid blocking producers. Use `Vector::BLF::File::setObjectQueueBufferSize()`
+and `Vector::BLF::File::setUncompressedFileBufferSize()` (or the combined
+`setWriteBufferSizes()` helper) to increase the number of objects and the amount
+of uncompressed data that may be staged in memory before it is compressed and
+written to disk.
+
+The compressor now scales across multiple CPU cores. Call
+`Vector::BLF::File::setCompressionThreadCount()` to configure how many
+background compression workers will drain the staging buffers for each file.
+Passing `0` keeps the default of one worker per logical CPU. Larger thread
+counts help in situations where a single compression worker could not keep up
+with many producers.
+
+The `vector-blf-multi-writer-benchmark` example demonstrates writing ten CAN
+channels in parallel and reports the achieved throughput together with the
+buffer settings that were used. Build the examples with
+`-DOPTION_BUILD_EXAMPLES=ON` to run the benchmark. The tool also accepts a
+`--compression-threads` argument to exercise the parallel compressor.
+
 # Build on Linux (e.g. Debian Testing)
 
 Building under Linux works as usual:
