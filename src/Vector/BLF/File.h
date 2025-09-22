@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
